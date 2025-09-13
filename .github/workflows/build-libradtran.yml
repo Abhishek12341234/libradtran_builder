@@ -1,0 +1,101 @@
+name: Build libRadtran + pack offline env
+on:
+  workflow_dispatch: {}   # run manually from Actions tab
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Install a conda-like env (micromamba) with all build deps
+      - name: Set up micromamba
+        uses: mamba-org/setup-micromamba@v2
+        with:
+          micromamba-version: "latest"
+          init-shell: bash
+          cache-environment: false
+          environment-name: lrt
+          create-args: >-
+            -c conda-forge
+            python
+            gcc_linux-64
+            gfortran_linux-64
+            make
+            flex
+            pkg-config
+            libnetcdf
+            netcdf-fortran
+            gsl
+            conda-pack
+
+      - name: Show tools
+        shell: bash -l {0}
+        run: |
+          which gcc || true
+          which gfortran || true
+          nc-config --version
+          nf-config --version
+          conda-pack --version
+
+      - name: Download libRadtran
+        shell: bash -l {0}
+        run: |
+          curl -L -o libRadtran-2.0.6.tar.gz https://www.libradtran.org/download/libRadtran-2.0.6.tar.gz
+          tar -xzf libRadtran-2.0.6.tar.gz
+          mv libRadtran-2.0.6 libradtran
+
+      - name: Configure & build (uvspec with DISORT)
+        shell: bash -l {0}
+        working-directory: libradtran
+        env:
+          CC: gcc
+          FC: gfortran
+        run: |
+          # Use NetCDF & GSL from the micromamba env
+          export CPPFLAGS="$(nc-config --cflags)"
+          export LDFLAGS="$(nc-config --libs)"
+          export LIBS="$(nf-config --flibs) $(nc-config --libs) -lgsl -lgslcblas"
+
+          ./configure
+          make -j
+
+          # tiny smoke test -> reflectivity at 650 nm
+          cat > test.inp << 'EOF'
+          atmosphere_file  tropical
+          rte_solver       disort
+          sza 30
+          umu 1.0
+          phi 0
+          zout toa
+          albedo 0.10
+          wavelength 650 650
+          output_quantity  reflectivity
+          quiet
+          EOF
+          ./bin/uvspec < test.inp | tee test_out.txt
+
+          # prepare a neat artifact folder
+          mkdir -p ../artifact/bin
+          cp -a bin/* ../artifact/bin/
+          cp test.inp test_out.txt ../artifact/
+          tar -czf ../libradtran-bin.tgz -C ../artifact .
+
+      - name: Upload libRadtran binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: libradtran-bin
+          path: libradtran-bin.tgz
+          if-no-files-found: error
+
+      - name: Pack portable conda env
+        shell: bash -l {0}
+        run: |
+          conda-pack -n lrt -o lrt-offline.tar.gz
+      - name: Upload portable env
+        uses: actions/upload-artifact@v4
+        with:
+          name: lrt-offline
+          path: lrt-offline.tar.gz
+          if-no-files-found: error
